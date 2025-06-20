@@ -95,7 +95,7 @@ class StandardMolecule:
         if not hasattr(self, 'std_mol'):
             raise ValueError("Standard molecule has not been created yet.")
         
-        from utils import get_atom_mapping
+        from shim.utils import get_atom_mapping
 
         atom_names = [atom.GetProp('atomName') for atom in self.std_mol.GetAtoms()]
         atom_mapping = get_atom_mapping(mol, self.std_mol, match_hydrogens=False, silent=False)
@@ -164,6 +164,32 @@ class StandardMolecule:
         """
         pass
 
+# from Bio.PDB.PDBParser import PDBParser
+# from Bio.PDB.StructureBuilder import StructureBuilder
+
+# class DuplicateRecordingBuilder(StructureBuilder):
+#     def __init__(self):
+#         super().__init__()
+#         self.duplicates = []
+
+#     def init_atom(self, name, coord, b_factor, occupancy, altloc, fullname,
+#                   serial_number, element=None):
+        
+#         if name in self.residue:
+#             # self.residue is still the current residue object
+#             res = self.residue
+#             self.duplicates.append(
+#                 (res.get_parent().id, res.id[1], res.id[2], name, altloc)
+#             )
+#             if True:
+#                 raise ValueError(
+#                     f"Duplicate atom name '{name}' in residue {res.get_resname()} "
+#                     f"in chain {res.get_parent().id} at index {res.id[1]}."
+#                 )
+#         else:
+#             super().init_atom(name, coord, b_factor, occupancy, altloc,
+#                                 fullname, serial_number, element)
+            
 
 class ShimStructure:
     def __init__(self, pdb_file=None, cif_file=None, structure=None):
@@ -182,19 +208,45 @@ class ShimStructure:
         else:
             raise ValueError("Either pdb_file, cif_file, or structure must be provided.")
 
-    def read_structure(self):
+        # Verify we have a structure:
+        if not self.structure:
+            raise ValueError("Failed to read structure from provided files.")
+
+    def read_structure(self, sanity_check=True):
         """
         Reads a PDB or CIF file and returns a Biopython structure object.
         """
         from Bio import PDB
 
-        parser = PDB.PDBParser(QUIET=True)
         if self.pdb_file:
-            return parser.get_structure('PDB', self.pdb_file)
+            #builder = DuplicateRecordingBuilder()
+            #parser  = PDBParser(PERMISSIVE=True, QUIET=True, structure_builder=builder)
+            parser = PDB.PDBParser(QUIET=False)
+            structure = parser.get_structure('PDB', self.pdb_file)
         elif self.cif_file:
-            return parser.get_structure('CIF', self.cif_file)
+            parser = PDB.MMCIFParser(QUIET=False)
+            structure = parser.get_structure('CIF', self.cif_file)
         else:
             raise ValueError("Either pdb_file or cif_file must be provided.")
+
+        ### I need to figure out how to check when a PDB file has redundant atom names.
+        ### Currently, PDBParser just skips duplicate atoms - so we can't check this here.    
+        ### We could use a custom StructureBuilder to record duplicates, as drafted above.    
+        # if sanity_check:
+        #     # Check that each residue doesn't have redundant atom names:
+        #     for model in structure:
+        #         for chain in model:
+        #             for residue in chain:
+        #                 atom_names = set()
+        #                 print()
+        #                 for atom in residue:
+        #                     print(atom.get_name(), end=' ')
+        #                     if atom.get_name() in atom_names:
+        #                         raise ValueError(f"Duplicate atom name {atom.get_name()} found in residue {residue.get_resname()} in chain {chain.id}.")
+        #                     atom_names.add(atom.get_name())
+        #                 print(atom_names)
+
+        return structure
 
     def extract_residue(self, chain_id, residue_index):
         """
@@ -269,8 +321,8 @@ class ShimStructure:
             ligand_atom_name = ligand_atom.GetProp('atomName')
 
             target_atom.name = ligand_atom_name
-            # Update the 4-char fullname for PDB output
-            target_atom.fullname = ligand_atom_name.rjust(4)
+            target_atom.fullname = ligand_atom_name#.rjust(4)
+            target_atom.id = ligand_atom_name
 
     def to_pdb(self, outfile):
         """
@@ -282,6 +334,7 @@ class ShimStructure:
         # truncate atom.id to 3 chars
         for atom in self.structure.get_atoms():
             if len(atom.get_id()) > 3:
+
                 atom.fullname = atom.get_id()[:3]  # Update fullname as well
 
         # And, truncate the resname to 3 chars
@@ -332,14 +385,38 @@ class ShimStructure:
 
     def to_mol(self):
         """
-        Converts the structure to an RDKit molecule.
+        Converts the structure to an RDKit molecule. (Single residue only)
         :return: An RDKit molecule object.
         """
         from rdkit import Chem
 
-        pdb_block = self.to_pdb_block()
-        mol = Chem.MolFromPDBBlock(pdb_block, sanitize=False)
+        # Get the number of residues in the structure:
+        num_residues = sum(1 for _ in self.structure.get_residues())
+        if num_residues > 1:
+            raise ValueError("Structure contains multiple residues. Please extract a single residue before converting to RDKit molecule.")
+
+        pdb_block = self.to_pdb_block() ###!
+        mol = Chem.MolFromPDBBlock(pdb_block, sanitize=False, removeHs=False) 
         if mol is None:
             raise ValueError("Failed to convert structure to RDKit molecule.")
         
+        ### Set atomName properties using our saved Structure (the PDB truncates this!):
+        bp_atoms = list(self.structure.get_atoms())                 # original order
+        for rd_atom, bp_atom in zip(mol.GetAtoms(), bp_atoms):
+            rd_atom.SetProp("orig_atom_name", bp_atom.get_name())  # no width limit
+
         return mol
+
+    def get_residues_by_name(self, resname):
+        """
+        Returns a list of tuples (chain_id, residue_index) for residues with the given name.
+        :param resname: The name of the residue to search for (e.g., 'LIG').
+        :return: List of tuples (chain_id, residue_index).
+        """
+        residues = []
+        for model in self.structure:
+            for chain in model:
+                for res in chain:
+                    if res.get_resname() == resname:
+                        residues.append((chain.id, res.get_id()[1]))
+        return residues

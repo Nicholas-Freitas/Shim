@@ -1,6 +1,7 @@
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 from pathlib import Path
+import termol
 
 def get_atom_mapping(mol_A: Chem.Mol, mol_B: Chem.Mol, match_hydrogens=False, silent=False):
     '''
@@ -81,115 +82,13 @@ def get_atom_mapping(mol_A: Chem.Mol, mol_B: Chem.Mol, match_hydrogens=False, si
         Unmapped atoms in mol_A: {mol_A_unmapped_atoms}, Unmapped atoms in mol_B: {mol_B_unmapped_atoms}'
         
         if not silent:
-            termol.draw(Chem.MolToSmiles(mol_A), name=mol_A_file, three_d=False)
-            termol.draw(Chem.MolToSmiles(mol_B), name=mol_B_file, three_d=False)
+            termol.draw(Chem.MolToSmiles(mol_A), name='mol_A', three_d=False)
+            termol.draw(Chem.MolToSmiles(mol_B), name='mol_B', three_d=False)
         raise ValueError(message)
     
     # Align the SDF molecule to the mol_A molecule using this atom mapping
     #AllChem.AlignMol(sdf_mol, mol_A, atomMap=list(atom_mapping.items()))
     
     return atom_mapping
-
-def write_conect_file(mol: Chem.Mol,
-                      residue_name: str,
-                      chemical_name: str,
-                      output_path: str | Path ) -> None:
-    """
-    Write a PDB-style CONECT block for an RDKit molecule whose atoms have an
-    'atomName' property.
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.Mol
-        Molecule with properly-set bonds and atom property 'atomName'.
-    residue_name : str, default 'KP4'
-        Three-letter code to appear in RESIDUE / HET lines.
-    output_path : str | Path, default 'kp4_conect.txt'
-        Path of the file to create.
-    """
-    # --- gather basic info ----------------------------------------------------
-    atom_count = mol.GetNumAtoms()
-    formula = rdMolDescriptors.CalcMolFormula(mol)
-
-    # Build “CONECT …” lines
-    conect_lines: list[str] = []
-    for atom in mol.GetAtoms():
-        name = atom.GetProp("atomName")
-
-        # Neighbour names, as stored on the neighbour atoms
-        neighbour_names = [n.GetProp("atomName") for n in atom.GetNeighbors()]
-
-        line = ""
-        #0-11: CONECT
-        #12-18: Atom name
-        #19-20: Number of neighbours
-        #21+ - Neighbour names, each 5 characters wide
-
-        line += f"CONECT      "
-        line += f"{name:<6}"
-        line += f"{len(neighbour_names):>2} "
-        for neighbour_name in neighbour_names:
-            line += f"{neighbour_name:<5}"
-        conect_lines.append(line)
-
-    # --- write file -----------------------------------------------------------
-    output_path = Path(output_path)
-    with output_path.open("w") as fh:
-        fh.write(f"RESIDUE   {residue_name:<3}{atom_count:>7}\n")
-        fh.writelines(l + "\n" for l in conect_lines)
-        fh.write("END   \n")                       # terminate CONECT block
-        fh.write(f"HET    {residue_name:<5}{atom_count:>13}\n")
-        fh.write(f"HETNAM     {residue_name} {chemical_name}\n")   # customise as needed
-        fh.write(f"FORMUL      {residue_name}    {formula}\n")
-
-    print(f"Wrote {output_path.resolve()} ({atom_count} atoms)")
-
-
-def write_conect_file(mol: Chem.Mol,
-                      residue_name: str,
-                      chemical_name: str,
-                      output_path: str | Path) -> None:
-    """
-    Write a PDB-style CONECT block for an RDKit molecule whose atoms have an
-    'atomName' property, listing heavy atoms first and hydrogens last.
-    """
-    atom_count = mol.GetNumAtoms()
-    formula = rdMolDescriptors.CalcMolFormula(mol)
-
-    heavy_lines: list[str] = []
-    hydrogen_lines: list[str] = []
-
-    for atom in mol.GetAtoms():
-        name = atom.GetProp("atomName")
-        neighbour_names = [n.GetProp("atomName") for n in atom.GetNeighbors()]
-
-        # Build the fixed-width CONECT line
-        line = (
-            "CONECT      "          # cols 1-11
-            f"{name:<6}"            # cols 12-17 (left-aligned)
-            f"{len(neighbour_names):>2} "  # cols 18-20
-            + "".join(f"{nbr:<5}" for nbr in neighbour_names)  # 21+
-        )
-
-        # Route to heavy-atom or hydrogen list
-        if atom.GetAtomicNum() == 1 or name.startswith("H"):
-            hydrogen_lines.append(line)
-        else:
-            heavy_lines.append(line)
-
-    conect_lines = heavy_lines + hydrogen_lines
-
-    # ---------- write file ----------
-    output_path = Path(output_path)
-    with output_path.open("w") as fh:
-        fh.write(f"RESIDUE   {residue_name:<3}{atom_count:>7}\n")
-        fh.writelines(l + "\n" for l in conect_lines)
-        fh.write("END   \n")
-        fh.write(f"HET    {residue_name:<5}{atom_count:>13}\n")
-        fh.write(f"HETNAM     {residue_name} {chemical_name}\n")
-        fh.write(f"FORMUL      {residue_name}    {formula}\n")
-
-    print(f"Wrote {output_path.resolve()} ({atom_count} atoms)")
-
 
 

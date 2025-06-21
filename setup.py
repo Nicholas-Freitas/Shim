@@ -21,6 +21,6 @@ setup(
     install_requires=[
     'rdkit',
     'biopython',
-    'termol'
+    'termol>=0.1.7' #this is causing issues due to rdkit/rdkit-pypi reqs.
     ],
 )

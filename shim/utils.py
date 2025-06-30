@@ -25,6 +25,8 @@ def get_atom_mapping(mol_A: Chem.Mol, mol_B: Chem.Mol, match_hydrogens=False, si
         # Sneakily, we're still using hydrogens, but calling it noH still.
         mol_A_noH = mol_A
         mol_B_noH = mol_B
+        Chem.SanitizeMol(mol_A_noH) ### I'm not so sure about this
+        Chem.SanitizeMol(mol_B_noH)
 
     # Find MCS with relaxed bond order comparison
     mcs = rdFMCS.FindMCS(
@@ -91,4 +93,18 @@ def get_atom_mapping(mol_A: Chem.Mol, mol_B: Chem.Mol, match_hydrogens=False, si
     
     return atom_mapping
 
+def validate_structure_file(infile: str):
+    '''
+    Verify if a file is a PDB or a CIF. 
+    Return a Path object of the file, and the file type ('.pdb' or '.cif').
+    '''
+    # Is the input a pdb or CIF?
+    infile_path = Path(infile)
+    infile_type = infile_path.suffix.lower()
+    if infile_type in ['.pdb', '.cif']:
+        # If it's a PDB or CIF file, we can proceed.
+        pass
+    else:
+        raise ValueError(f"Unsupported file type: {infile_path.suffix}. Expected .pdb or .cif.")
 
+    return infile_path, infile_type

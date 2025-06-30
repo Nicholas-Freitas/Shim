@@ -86,7 +86,7 @@ class StandardMolecule:
         self.std_smiles, self.std_mol = mol_to_std(mol)
         self.set_standard_names()
 
-    def rename_to_standard(self, mol):
+    def rename_to_standard(self, mol, use_hydrogens=False):
         """
         Renames the atoms in the provided molecule to match the standard names.
         :param mol: RDKit molecule object to rename.
@@ -98,19 +98,23 @@ class StandardMolecule:
         from shim.utils import get_atom_mapping
 
         atom_names = [atom.GetProp('atomName') for atom in self.std_mol.GetAtoms()]
-        atom_mapping = get_atom_mapping(mol, self.std_mol, match_hydrogens=False, silent=False)
+        atom_mapping = get_atom_mapping(mol, self.std_mol, match_hydrogens=use_hydrogens, silent=False)
         
+        matched_atoms = []
+        unmatched_atoms = []
         for i, atom in enumerate(mol.GetAtoms()):
             if i in atom_mapping:
                 # Get the new name from the standard names list
                 new_name = atom_names[atom_mapping[i]]
                 # Set the atom name property
                 atom.SetProp("atomName", new_name)
+                matched_atoms.append(f"Atom {i},{atom.GetSymbol()} -> {new_name}")
+            else:
+                unmatched_atoms.append(f"Atom {i},{atom.GetSymbol()} -> No match found in standard names.")
 
         # Ensure all atoms have a name property
-        for atom in mol.GetAtoms():
-            if not atom.HasProp("atomName"):
-                raise ValueError(f"Atom {atom.GetIdx()} does not have a name property set. Please check the atom mapping and standard names.")
+        if unmatched_atoms:
+            raise ValueError(f"Some atoms could not be matched to standard names:\n" + "\n".join(matched_atoms) + "\n"+ "\n".join(unmatched_atoms))
             
         return mol
 
@@ -163,33 +167,6 @@ class StandardMolecule:
         Displays in 2D using Termol package.
         """
         pass
-
-# from Bio.PDB.PDBParser import PDBParser
-# from Bio.PDB.StructureBuilder import StructureBuilder
-
-# class DuplicateRecordingBuilder(StructureBuilder):
-#     def __init__(self):
-#         super().__init__()
-#         self.duplicates = []
-
-#     def init_atom(self, name, coord, b_factor, occupancy, altloc, fullname,
-#                   serial_number, element=None):
-        
-#         if name in self.residue:
-#             # self.residue is still the current residue object
-#             res = self.residue
-#             self.duplicates.append(
-#                 (res.get_parent().id, res.id[1], res.id[2], name, altloc)
-#             )
-#             if True:
-#                 raise ValueError(
-#                     f"Duplicate atom name '{name}' in residue {res.get_resname()} "
-#                     f"in chain {res.get_parent().id} at index {res.id[1]}."
-#                 )
-#         else:
-#             super().init_atom(name, coord, b_factor, occupancy, altloc,
-#                                 fullname, serial_number, element)
-            
 
 class ShimStructure:
     def __init__(self, pdb_file=None, cif_file=None, structure=None):
@@ -288,6 +265,43 @@ class ShimStructure:
         # 3. Return a new ShimStructure object with the new structure:
         return ShimStructure(structure=new_structure)
 
+    def extract_chain(self, chain_id):
+        """
+        Extracts a specific chain from the structure, and returns a new ShimStructure object
+        containing only that chain.
+        :param chain_id: The chain identifier (e.g. 'A').
+        :return: A new ShimStructure object containing the specified chain.
+        """
+        
+        # 1. Get chain from the Structure object:
+        target_chain = None
+        for model in self.structure:
+            for chain in model:
+                if chain.id == chain_id:
+                    target_chain = chain
+                    break
+        if target_chain is None:
+            raise ValueError(f"Chain {chain_id} not found in structure.")
+
+        # 2. Create a new Structure object with just this chain:
+        from Bio.PDB import Structure, Model, Chain, Residue, Atom
+        new_structure = Structure.Structure('ExtractedChain')
+        model = Model.Model(0)
+        chain = Chain.Chain(chain_id)  # Create a new chain
+        for residue in target_chain:
+            new_residue = Residue.Residue(residue.get_id(), residue.get_resname(), residue.segid)
+            for atom in residue:
+                # Create a new atom with the same properties
+                new_atom = Atom.Atom(atom.get_id(), atom.coord, atom.bfactor, atom.occupancy, atom.altloc,
+                                     atom.fullname, atom.serial_number, atom.element)
+                new_residue.add(atom=new_atom)
+            chain.add(new_residue)
+        model.add(chain)
+        new_structure.add(model)
+
+        # 3. Return a new ShimStructure object with the new structure:
+        return ShimStructure(structure=new_structure)
+
     def rename_residue_with_mol(self, chain_id, residue_index, mol):
         """
         Renames the atoms in the structure's residue using the provided RDKit molecule.
@@ -323,6 +337,35 @@ class ShimStructure:
             target_atom.name = ligand_atom_name
             target_atom.fullname = ligand_atom_name#.rjust(4)
             target_atom.id = ligand_atom_name
+
+    def rename_chain(self, old_chain_id, new_chain_id):
+        """
+        Renames a chain in the structure.
+        :param old_chain_id: The current chain identifier (e.g. 'A').
+        :param new_chain_id: The new chain identifier (e.g. 'B').
+        :return: None, modifies the structure in place.
+        """
+        for model in self.structure:
+            for chain in model:
+                if chain.id == old_chain_id:
+                    chain.id = new_chain_id
+                    return
+        raise ValueError(f"Chain {old_chain_id} not found in structure.")
+
+    def rename_residue(self, old_resname, new_resname):
+        """
+        Renames residues in the structure.
+        :param
+        old_resname: The current residue name (e.g. 'LIG').
+        :param new_resname: The new residue name (e.g. 'LIG1').
+        :return: None, modifies the structure in place.
+        """       
+        for model in self.structure:
+            for chain in model:
+                for residue in chain:
+                    if residue.get_resname() == old_resname:
+                        residue.resname = new_resname
+        return
 
     def to_pdb(self, outfile):
         """
@@ -370,16 +413,31 @@ class ShimStructure:
         io.save(output, preserve_atom_numbering=True)
         return output.getvalue()
 
-    def to_pdb_block(self):
+    def to_pdb_block(self, suppress_warnings=False):
         """
         Returns the PDB block as a string.
         """
         from Bio.PDB import PDBIO
         from io import StringIO
 
+        # Create a copy of the structure to avoid modifying the original:
+        structure_copy = self.structure.copy()
+
+        # Make sure all residue names and atom names are truncated to 3 characters:
+        for atom in structure_copy.get_atoms():
+            if len(atom.get_id()) > 3:
+                atom.fullname = atom.get_id()[:3]
+                if not suppress_warnings:
+                    print(f"Warning: Atom name {atom.get_id()} truncated to {atom.fullname}.")
+        for residue in structure_copy.get_residues():
+            if len(residue.get_resname()) > 3:
+                residue.resname = residue.get_resname()[:3]
+                if not suppress_warnings:
+                    print(f"Warning: Residue name {residue.get_resname()} truncated to {residue.resname}.")
+
         output = StringIO()
         io = PDBIO()
-        io.set_structure(self.structure)
+        io.set_structure(structure_copy)
         io.save(output, preserve_atom_numbering=True)
         return output.getvalue()
 
@@ -395,8 +453,14 @@ class ShimStructure:
         if num_residues > 1:
             raise ValueError("Structure contains multiple residues. Please extract a single residue before converting to RDKit molecule.")
 
-        pdb_block = self.to_pdb_block() ###!
-        mol = Chem.MolFromPDBBlock(pdb_block, sanitize=False, removeHs=False) 
+        # # Create a copy of the current ShimStructure as a new ShimStructure object:
+        # structure_copy = ShimStructure(structure=self.structure.copy())
+        # # Rename the single residue to 'LIG' (or any other name you prefer):
+        # structure_copy.rename_residue(old_resname=structure_copy.structure.get_residues().__next__().get_resname(), new_resname='LIG')
+
+        pdb_block = self.to_pdb_block(suppress_warnings=True) ###!
+        mol = Chem.MolFromPDBBlock(pdb_block, sanitize=False, removeHs=False)
+                        
         if mol is None:
             raise ValueError("Failed to convert structure to RDKit molecule.")
         
@@ -420,3 +484,48 @@ class ShimStructure:
                     if res.get_resname() == resname:
                         residues.append((chain.id, res.get_id()[1]))
         return residues
+
+    def get_protein_chains(self):
+        """
+        Return a list of chain IDs that contain protein residues.
+        """
+
+        from Bio.PDB import Polypeptide as PP
+
+        prot_chain_list = []
+
+        for model in self.structure:
+            for chain in model:
+                for res in chain:
+                    if PP.is_aa(res):
+                        prot_chain_list.append(chain.id)
+                        break
+        return prot_chain_list
+
+    def get_COG(self):
+        """ 
+        Gets the Center of Geometry of the structure.
+        """
+        import numpy as np
+
+        coords = []
+        for atom in self.structure.get_atoms():
+            coords.append(atom.coord)
+        coords = np.array(coords)
+        cog = np.mean(coords, axis=0)
+        return cog
+
+    def get_minimum_distance(self, position: tuple):
+        """
+        Gets the minimum distance from the given position to any atom in the structure.
+        :param position: A tuple of (x, y, z) coordinates.
+        :return: The minimum distance.
+        """
+        import numpy as np
+
+        min_dist = float('inf')
+        for atom in self.structure.get_atoms():
+            dist = np.linalg.norm(atom.coord - np.array(position))
+            if dist < min_dist:
+                min_dist = dist
+        return min_dist

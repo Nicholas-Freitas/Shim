@@ -1,6 +1,8 @@
 ### For creating specific software-specific filetypes from StandardMolecules or ShimStructures
 from shim.structure import StandardMolecule
 from pathlib import Path
+from rdkit import Chem
+from rdkit.Chem import rdMolDescriptors
 
 def write_reduce_db(standard_mol: StandardMolecule,
                       residue_name: str,

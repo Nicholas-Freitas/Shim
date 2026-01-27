@@ -1,13 +1,15 @@
+from typing import List, Tuple
+from tempfile import NamedTemporaryFile
+
 class StandardMolecule:
     def __init__(self, smiles: str = None, 
-                        pdb_file = None, 
-                        cif_file = None, 
-                        sdf_file = None, 
+                        structure_file: str = None,
                         mol = None,
                         use_existing_atom_names=False):
         """
         Initializes a StandardMolecule object.
         TODO: use_existing_atom_names is not implemented
+        TODO: During standardization, the renumbering is not tested to be consistent!
         TODO: Not thoroughly tested.
         """
 
@@ -15,9 +17,14 @@ class StandardMolecule:
             raise NotImplementedError("use_existing_atom_names is not implemented yet.")
         
         self.raw_smiles = smiles
-        self.pdb_block = self.read(pdb_file)
-        self.cif_block = self.read(cif_file)
-        self.sdf_block = self.read(sdf_file)
+
+        
+        self.pdb_block = None
+        self.cif_block = None
+        self.sdf_block = None
+        # Set the pdb, cif, and sdf blocks if provided:
+        if structure_file is not None:
+            self.read(structure_file)
         self.raw_mol = mol
         
         # We need at least 1 of the above:
@@ -34,10 +41,19 @@ class StandardMolecule:
         """
         Reads a file and returns its content.
         """
-        if file_path:
+
+        file_path = str(file_path)
+        
+        # is it a pdb, cif, or sdf
+        if file_path.lower().endswith('.pdb'):
             with open(file_path, 'r') as file:
-                return file.read()
-        return None
+                self.pdb_block = file.read()
+        elif file_path.lower().endswith('.cif'):
+            with open(file_path, 'r') as file:
+                self.cif_block = file.read()
+        elif file_path.lower().endswith('.sdf') or file_path.lower().endswith('.mol'):
+            with open(file_path, 'r') as file:
+                self.sdf_block = file.read()
 
     def create_standard_mol(self, use_existing_atom_names=False):
         """
@@ -169,40 +185,95 @@ class StandardMolecule:
         pass
 
 class ShimStructure:
-    def __init__(self, pdb_file=None, cif_file=None, structure=None):
+    def __init__(self, structure_file=None, structure=None, force=False):
         """
         Thin wrapper around Bio.PDB.Structure.Structure object.
-        Can be used to extract residues, etc.
+        Created by providing a PDB or CIF file.
         """
-        self.pdb_file = pdb_file
-        self.cif_file = cif_file
-        self.structure = structure
 
-        if structure:
+        if structure is not None:
             self.structure = structure
-        elif (pdb_file or cif_file):
-            self.structure = self.read_structure()
-        else:
-            raise ValueError("Either pdb_file, cif_file, or structure must be provided.")
+        elif structure_file is not None:
+            self.structure = self.read_structure(structure_file, force=force)
 
         # Verify we have a structure:
         if not self.structure:
             raise ValueError("Failed to read structure from provided files.")
 
-    def read_structure(self, sanity_check=True):
+    def read_structure(self, structure_file, sanity_check=True, force=False):
         """
         Reads a PDB or CIF file and returns a Biopython structure object.
         """
         from Bio import PDB
 
-        if self.pdb_file:
-            #builder = DuplicateRecordingBuilder()
-            #parser  = PDBParser(PERMISSIVE=True, QUIET=True, structure_builder=builder)
+        suffix = str(structure_file).split('.')[-1].lower()
+
+        # This allows us to load PDB files with more than 10,000 residues by converting hybrid-36 to decimal.
+        # This is an abuse of the PDB format. Ideally, we should use CIF files for such large structures.
+        def hybrid36_to_dec(s):
+            """ Convert a hybrid-36 encoded string to a decimal integer. """
+            # Define the character set for hybrid-36 encoding
+            charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            base = len(charset)
+            
+            # Initialize the result
+            result = 0
+            
+            # Iterate over each character in the string
+            for i, char in enumerate(reversed(s)):
+                if char not in charset:
+                    raise ValueError(f"Invalid character '{char}' in hybrid-36 string.")
+                value = charset.index(char)
+                result += value * (base ** i)
+            
+            return result
+
+        if suffix == 'pdb':
             parser = PDB.PDBParser(QUIET=False)
-            structure = parser.get_structure('PDB', self.pdb_file)
-        elif self.cif_file:
+            try:
+                # Are there more than 10,000 residues?
+                too_many_residues = False
+                with open(structure_file, 'r') as f:
+                    for i, line in enumerate(f):
+                        if line.startswith('ATOM') or line.startswith('HETATM'):
+                            if hybrid36_to_dec(line[22:26].strip()) > 10000:
+                                too_many_residues = True
+                                break
+
+                if too_many_residues:
+                    if not force:
+                        raise ValueError("The PDB file appears to have more than 10,000 residues, which may cause issues with atom naming. Consider using a CIF file instead, or set force=True to proceed anyway.")
+                    else:
+                        print("Warning: Proceeding with a PDB file that has more than 10,000 residues. This may cause issues with atom naming.")
+                        temp_structure = NamedTemporaryFile(mode='w+', suffix='.pdb', delete=False)
+
+                        with open(structure_file, 'r') as original_file:
+                            # for each line, replace the hybrid-36 resid with decimal % 10000:
+                            for line in original_file:
+                                if line.startswith('ATOM') or line.startswith('HETATM'):
+                                    resid = line[22:26].strip()
+                                    if resid:
+                                        dec_resid = hybrid36_to_dec(resid) % 10000
+                                        new_line = line[:22] + str(dec_resid).rjust(4) + line[26:]
+                                        temp_structure.write(new_line)
+                                    else:
+                                        temp_structure.write(line)
+                                else:
+                                    temp_structure.write(line)
+                        temp_structure.flush()
+                        structure = parser.get_structure('PDB', temp_structure.name)
+                else:
+                    structure = parser.get_structure('PDB', structure_file)
+            
+            except Exception as e:
+                raise ValueError(f"Failed to parse PDB file: {e}\n. \
+                Do you have an improperly formatted PDB file, or more than 10,000 residues? A CIF file may be better.")
+        elif suffix == 'cif':
             parser = PDB.MMCIFParser(QUIET=False)
-            structure = parser.get_structure('CIF', self.cif_file)
+            try:
+                structure = parser.get_structure('CIF', structure_file)
+            except Exception as e:
+                raise ValueError(f"Failed to parse CIF file: {e}")
         else:
             raise ValueError("Either pdb_file or cif_file must be provided.")
 
@@ -225,6 +296,86 @@ class ShimStructure:
 
         return structure
 
+    ### STANDARDIZE STRUCTURE COMPONENTS ###
+    def standardize(self, standard_molecules: List[StandardMolecule], use_hydrogens=False, verbose=False, renumber=False):
+        """
+        Standardizes the atom names in the structure using a list of StandardMolecule objects.
+        :param standard_molecules: List of StandardMolecule objects to use for standardization.
+        :return: None, modifies the structure in place.
+        """
+        # Get all residues in the structure:
+        all_residues = self.get_residues()
+
+        # For each standard molecule, find matching residues and standardize them:
+        for std_mol in standard_molecules:
+            matched_residues = self.match_residues_to_mol(all_residues, std_mol, use_hydrogens=use_hydrogens, verbose=verbose)
+            for chain_id, residue_index, resname in matched_residues:
+                print(f"Standardizing residue {residue_index} in chain {chain_id} ({resname}) using provided standard molecule.")
+                self.standardize_residue(chain_id, residue_index, std_mol, use_hydrogens=use_hydrogens)
+        
+        # Renumber residues manually:
+        if renumber:
+            for chain in self.structure.get_chains():
+                new_id = 1
+                for residue in chain.get_residues():
+                    hetflag, old_resseq, icode = residue.id
+                    # overwrite residue.id with a new contiguous seq number
+                    residue.id = (hetflag, new_id, icode)
+                    new_id += 1
+
+    def standardize_residue(self, chain_id, residue_index, standard_molecule: StandardMolecule, use_hydrogens=False):
+        """
+        Standardizes the atom names in a specific residue of the structure using a StandardMolecule.
+        :param chain_id: The chain identifier (e.g. 'A').
+        :param residue_index: The residue index (an integer).
+        :param standard_molecule: A StandardMolecule object to use for standardization.
+        :param use_hydrogens: Whether to consider hydrogens in the matching process.
+        :return: None, modifies the structure in place.
+        """
+
+        # 1. Extract the residue from the structure
+        extracted_res_structure = self.extract_residue(chain_id, residue_index)
+
+        # 2. Convert residue Structure to a Mol object
+        extracted_res_mol = extracted_res_structure.to_mol()
+
+        # 3. Rename atoms in the pdb-extracted molecule
+        extracted_res_mol = standard_molecule.rename_to_standard(extracted_res_mol, use_hydrogens=use_hydrogens)
+
+        # 4. Replace the atom names in the original Structure with the renamed residue:
+        self.rename_residue_with_mol(chain_id, residue_index, extracted_res_mol)
+
+    def match_residues_to_mol(self, residues: List[Tuple[str, int, str]], mol: StandardMolecule, use_hydrogens=False, verbose=False) -> List[Tuple[str, int, str]]:
+        """
+        Find which residues in the structure match the provided StandardMolecule structure.
+        Here we're using the get_atom_mapping function to see if the atoms can be mapped.
+        :param residues: List of tuples (chain_id, residue_index) to standardize.
+        :param mol: A StandardMolecule object to use for standardization.
+        :param use_hydrogens: Whether to consider hydrogens in the matching process.
+        :return: List of tuples (chain_id, residue_index) that match the molecule.
+        """
+        matched_residues = []
+        for chain_id, residue_index, resname in residues:
+            # 1. Extract the residue from the structure
+            extracted_res_structure = self.extract_residue(chain_id, residue_index)
+
+            # 2. Convert residue Structure to a Mol object
+            extracted_res_mol = extracted_res_structure.to_mol()
+
+            # 3. Try to rename atoms in the pdb-extracted molecule
+            try:
+                from shim.utils import get_atom_mapping
+                atom_mapping = get_atom_mapping(extracted_res_mol, mol.get_mol(), match_hydrogens=use_hydrogens, silent=True)
+                matched_residues.append((chain_id, residue_index, resname))
+                if verbose:
+                    print(f"SUCCESS! Residue {residue_index} in chain {chain_id} matches the provided molecule with mapping: {atom_mapping}")
+            except ValueError as e:
+                if verbose:
+                    print(f"Residue {residue_index} in chain {chain_id} did not match the provided molecule: {e}")
+
+        return matched_residues
+
+    ### EXTRACT SUBSTRUCTURES ###
     def extract_residue(self, chain_id, residue_index):
         """
         Extracts a specific residue from the structure, and returns a new ShimStructure object
@@ -302,6 +453,7 @@ class ShimStructure:
         # 3. Return a new ShimStructure object with the new structure:
         return ShimStructure(structure=new_structure)
 
+    ### RENAME STRUCTURE COMPONENTS ###
     def rename_residue_with_mol(self, chain_id, residue_index, mol):
         """
         Renames the atoms in the structure's residue using the provided RDKit molecule.
@@ -367,6 +519,7 @@ class ShimStructure:
                         residue.resname = new_resname
         return
 
+    ### OUTPUT STRUCTURE FORMATS ###
     def to_pdb(self, outfile):
         """
         Writes the structure to a PDB file.
@@ -399,6 +552,29 @@ class ShimStructure:
         io = MMCIFIO()
         io.set_structure(self.structure)
         io.save(outfile, preserve_atom_numbering=True)
+
+    def to_fasta(self, outfile):
+        """
+        Writes the protein sequences in the structure to a FASTA file.
+        :param outfile: Path to the output FASTA file.
+        """
+        from Bio import SeqIO
+        from Bio.PDB import Polypeptide as PP
+        from Bio.Seq import Seq
+        from Bio.SeqRecord import SeqRecord
+
+        sequences = []
+        for model in self.structure:
+            for chain in model:
+                seq = ''
+                for res in chain:
+                    if PP.is_aa(res, standard=True):
+                        seq += self._resname_to_one(res.get_resname())
+                if seq:
+                    record = SeqRecord(Seq(seq), id=f"{chain.id}", description="")
+                    sequences.append(record)
+
+        SeqIO.write(sequences, outfile, "fasta")
 
     def to_cif_block(self):
         """
@@ -441,6 +617,31 @@ class ShimStructure:
         io.save(output, preserve_atom_numbering=True)
         return output.getvalue()
 
+    def to_fasta_block(self):
+        """
+        Returns the protein sequences in the structure as a FASTA formatted string.
+        """
+        from Bio import SeqIO
+        from Bio.PDB import Polypeptide as PP
+        from Bio.Seq import Seq
+        from Bio.SeqRecord import SeqRecord
+        from io import StringIO
+
+        sequences = []
+        for model in self.structure:
+            for chain in model:
+                seq = ''
+                for res in chain:
+                    if PP.is_aa(res, standard=True):
+                        seq += self._resname_to_one(res.get_resname())
+                if seq:
+                    record = SeqRecord(Seq(seq), id=f"{chain.id}", description="")
+                    sequences.append(record)
+
+        output = StringIO()
+        SeqIO.write(sequences, output, "fasta")
+        return output.getvalue()
+    
     def to_mol(self):
         """
         Converts the structure to an RDKit molecule. (Single residue only)
@@ -471,6 +672,26 @@ class ShimStructure:
 
         return mol
 
+    ### SET STRUCTURE INFO ###
+    def set_b_factor(self, chain_id, residue_index, b_factor):
+        """
+        Sets the B-factor for all atoms in a specific residue.
+        :param chain_id: The chain identifier (e.g. 'A').
+        :param residue_index: The residue index (integer).
+        :param b_factor: The B-factor value to set (float).
+        :return: None, modifies the structure in place.
+        """
+        for model in self.structure:
+            for chain in model:
+                if chain.id == chain_id:
+                    for res in chain:
+                        if res.get_id()[1] == residue_index:
+                            for atom in res:
+                                atom.set_bfactor(b_factor)
+                            return
+        raise ValueError(f"Residue {residue_index} not found in chain {chain_id}.")
+
+    ### GET STRUCTURE INFO ###
     def get_residues_by_name(self, resname):
         """
         Returns a list of tuples (chain_id, residue_index) for residues with the given name.
@@ -484,24 +705,64 @@ class ShimStructure:
                     if res.get_resname() == resname:
                         residues.append((chain.id, res.get_id()[1]))
         return residues
-
-    def get_protein_chains(self):
+    
+    def get_name_by_residue(self, chain_id, residue_index):
         """
-        Return a list of chain IDs that contain protein residues.
+        Returns the residue name for a given chain and residue index.
+        :param chain_id: The chain identifier (e.g. 'A').
+        :param residue_index: The residue index (an integer).
+        :return: The residue name (e.g. 'LIG').
+        """
+        for model in self.structure:
+            for chain in model:
+                if chain.id == chain_id:
+                    for res in chain:
+                        if res.get_id()[1] == residue_index:
+                            return res.get_resname()
+        raise ValueError(f"Residue {residue_index} not found in chain {chain_id}.")
+
+    def get_residues(self, protein_only=False, hetero_only=False):
+        """
+        Returns a list of tuples (chain_id, residue_index, resname) for all residues.
+        :param protein_only: If True, only return protein residues.
+        :param hetero_only: If True, only return hetero residues (non-protein).
+        :return: List of tuples (chain_id, residue_index, resname).
+        """
+        from Bio.PDB import Polypeptide as PP
+
+        residues = []
+        for model in self.structure:
+            for chain in model:
+                for res in chain:
+                    is_protein = PP.is_aa(res)
+                    if (protein_only and not is_protein) or (hetero_only and is_protein):
+                        continue
+                    residues.append((chain.id, res.get_id()[1], res.get_resname()))
+        return residues
+
+    def get_chains(self, protein_only=False, hetero_only=False):
+        """
+        Return a list of chain IDs in the structure.
+        :param protein_only: If True, only return chains that contain protein residues.
+        :param hetero_only: If True, only return chains that contain hetero residues (non-protein).
         """
 
         from Bio.PDB import Polypeptide as PP
 
-        prot_chain_list = []
+        chain_list = []
 
         for model in self.structure:
             for chain in model:
-                for res in chain:
-                    if PP.is_aa(res):
-                        prot_chain_list.append(chain.id)
-                        break
-        return prot_chain_list
+                has_protein = any(PP.is_aa(res) for res in chain)
+                has_hetero = any(not PP.is_aa(res) for res in chain)
+                
+                if (protein_only and not has_protein) or (hetero_only and not has_hetero):
+                    continue
+                
+                chain_list.append(chain.id)
+        return chain_list
 
+    ### UTILITIES ###
     def get_COG(self):
         """ 
         Gets the Center of Geometry of the structure.
@@ -529,3 +790,39 @@ class ShimStructure:
             if dist < min_dist:
                 min_dist = dist
         return min_dist
+
+    def _resname_to_one(self, resname):
+        """
+        Convert a three-letter residue name to a one-letter code with fallbacks.
+        Returns 'X' for unknown residue names.
+        """
+        # Normalize input
+        r = str(resname).strip()
+        # Try Biopython Polypeptide converter first
+        try:
+            from Bio.PDB import Polypeptide as PP
+            return PP.three_to_one(r)
+        except Exception:
+            pass
+
+        # Fallback to Bio.SeqUtils.seq1 which can handle some inputs
+        try:
+            from Bio.SeqUtils import seq1
+            return seq1(r)
+        except Exception:
+            pass
+
+        # Final fallback: manual mapping for standard amino acids
+        mapping = {
+            'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
+            'GLN': 'Q', 'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+            'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
+            'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V',
+            'SEC': 'U',    # selenocysteine
+            'PYL': 'O',    # pyrrolysine
+            'ASX': 'B',    # Asp or Asn
+            'GLX': 'Z',    # Glu or Gln
+            'XLE': 'J'     # Leu or Ile (nonstandard code sometimes used)
+        }
+        key = r[:3].upper()
+        return mapping.get(key, 'X')

@@ -19,7 +19,7 @@ def fix_atom_names_in_residue(infile: str, outfile: str, resname, sdf_file, use_
     infile_path, infile_type = validate_structure_file(infile)
 
     # Is the output file a pdb or CIF?
-    outfile_path, outfile_type = validate_structure_file(infile)
+    outfile_path, outfile_type = validate_structure_file(outfile)
 
     # Get a clean, standardized SDF molecule as our reference:
     standard_shim_mol = StandardMolecule(sdf_file=sdf_file)

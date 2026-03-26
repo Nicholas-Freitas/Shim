@@ -518,7 +518,7 @@ class ShimStructure:
                     if residue.get_resname() == old_resname:
                         residue.resname = new_resname
         return
-
+    
     ### OUTPUT STRUCTURE FORMATS ###
     def to_pdb(self, outfile):
         """

@@ -5,6 +5,7 @@ from tempfile import NamedTemporaryFile
 from Bio.PDB import PDBParser, PDBIO
 
 from pathlib import Path
+import numpy as np
 
 def fix_atom_names_in_residue(infile: str, outfile: str, resname, sdf_file, use_hydrogens=False):
     """
@@ -135,6 +136,148 @@ def rename_lig_chain_by_proximity(infile: str, outfile: str, resname: str, chain
     
     for chain in new_structure.structure[0]:
        print(f'Protein chain: {chain}')
+    
+def rename_atom_by_proximity(infile: str, outfile: str, 
+        target_chain: str, 
+        target_resid: int,
+        target_atom_name: str,
+        renaming_chain: str,
+        renaming_resid: int,
+        closest_atom_name: str,
+        ):
+    '''
+    For a given input file, identify the target atom and the "renaming" residue. Rename the atoms in 
+    the "renaming" residue so the atom identified by "closest_atom_name". 
+    This is for structures where we want to get the distance from a target atom in a symmetric residue, like ASP or GLU.
+    We can rename them so OD1 is always closest to our ligand.
+    
+    :param infile: Path to the input PDB/CIF file.
+    :param outfile: Path to the output PDB/CIF file.
+    :param target_chain: The chain of the target atom.
+    :param target_resid: The residue number of the target atom.
+    :param target_atom_name: The name of the target atom.
+    :param renaming_chain: The chain of the renaming residue.
+    :param renaming_resid: The residue number of the renaming residue.
+    :param closest_atom_name: The name of the atom to rename to.
+    
+    '''
+
+    SYMMETRIC_ATOMS = {
+        "ASP": [["OD1", "OD2"]],
+        "GLU": [["OE1", "OE2"]],
+        "PHE": [["CD1", "CD2"], ["CE1", "CE2"]],
+        "TYR": [["CD1", "CD2"], ["CE1", "CE2"]],
+        "ARG": [["NH1", "NH2"]],
+        "LEU": [["CD1", "CD2"]],
+        "VAL": [["CG1", "CG2"]],
+    }
+    # Is the input/output a pdb or CIF?
+    infile_path, infile_type = validate_structure_file(infile)
+    outfile_path, outfile_type = validate_structure_file(outfile)
+
+    # Get the structure"
+    if infile_type == '.pdb':
+        in_structure = ShimStructure(structure_file=infile)
+    elif infile_type == '.cif':
+        in_structure = ShimStructure(structure_file=infile)
+
+    # 1. Get the target atom coordinates
+    target_atom = None
+    for model in in_structure.structure:
+        for chain in model:
+            if chain.id == target_chain:
+                for residue in chain:
+                    # Residue ID looks like (" ", residue_number, " ")
+                    if residue.get_id()[1] == target_resid:
+                        if target_atom_name in residue:
+                            target_atom = residue[target_atom_name]
+                        break
+    
+    if target_atom is None:
+        raise ValueError(f"Target atom {target_atom_name} not found in residue {target_resid} of chain {target_chain}.")
+    
+    target_coord = target_atom.coord
+
+    # 2. Get the renaming residue
+    renaming_residue = None
+    for model in in_structure.structure:
+        for chain in model:
+            if chain.id == renaming_chain:
+                for residue in chain:
+                    if residue.get_id()[1] == renaming_resid:
+                        renaming_residue = residue
+                        break
+    
+    if renaming_residue is None:
+        raise ValueError(f"Renaming residue {renaming_resid} not found in chain {renaming_chain}.")
+
+    resname = renaming_residue.get_resname()
+    if resname not in SYMMETRIC_ATOMS:
+        print(f"Warning: Residue {resname} is not in the SYMMETRIC_ATOMS list. No action taken.")
+        return
+
+    # 3. Determine if we need to flip
+    # Find the pair containing closest_atom_name
+    primary_pair = None
+    for pair in SYMMETRIC_ATOMS[resname]:
+        if closest_atom_name in pair:
+            primary_pair = pair
+            break
+    
+    if primary_pair is None:
+        raise ValueError(f"closest_atom_name {closest_atom_name} not found in SYMMETRIC_ATOMS for {resname}.")
+
+    atom1_name, atom2_name = primary_pair
+    if atom1_name not in renaming_residue or atom2_name not in renaming_residue:
+        raise ValueError(f"Atoms {atom1_name} or {atom2_name} not found in residue {resname} {renaming_resid}.")
+
+    dist1 = np.linalg.norm(renaming_residue[atom1_name].coord - target_coord)
+    dist2 = np.linalg.norm(renaming_residue[atom2_name].coord - target_coord)
+
+    should_flip = (closest_atom_name == atom1_name and dist2 < dist1) or \
+                  (closest_atom_name == atom2_name and dist1 < dist2)
+
+    if should_flip:
+        print(f"Flipping symmetric atoms in {resname} {renaming_resid} because {closest_atom_name} is further than its symmetric partner.")
+        
+        swaps = []
+        for p in SYMMETRIC_ATOMS[resname]:
+            n1, n2 = p[0], p[1]
+            swaps.append((n1, n2))
+            
+            # Hydrogen heuristic: find the differing character (e.g., '1' vs '2')
+            # and swap any hydrogens that have that difference at the same position.
+            diff_idx = -1
+            for i in range(min(len(n1), len(n2))):
+                if n1[i] != n2[i]:
+                    diff_idx = i
+                    break
+            
+            if diff_idx != -1:
+                c1, c2 = n1[diff_idx], n2[diff_idx]
+                for atom in renaming_residue:
+                    h_name = atom.get_name()
+                    if h_name.startswith('H') and len(h_name) > diff_idx:
+                        if h_name[diff_idx] == c1:
+                            h2_name = h_name[:diff_idx] + c2 + h_name[diff_idx+1:]
+                            if h2_name in renaming_residue and (h_name, h2_name) not in swaps:
+                                swaps.append((h_name, h2_name))
+
+        # Perform the swaps
+        for n1, n2 in swaps:
+            a1, a2 = renaming_residue[n1], renaming_residue[n2]
+            # Swap name, fullname, id
+            a1.name, a2.name = a2.name, a1.name
+            a1.fullname, a2.fullname = a2.fullname, a1.fullname
+            a1.id, a2.id = a2.id, a1.id
+    else:
+        print(f"No flip needed for {resname} {renaming_resid}.")
+
+    # Write the modified structure back
+    if outfile_type == '.pdb':
+        in_structure.to_pdb(outfile)
+    elif outfile_type == '.cif':
+        in_structure.to_cif(outfile)
     
 
 # ### Test!
